@@ -2,9 +2,7 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"github.com/bitly/go-nsq"
-	"github.com/sethgrid/curse"
 	"log"
 	"math/rand"
 )
@@ -15,18 +13,6 @@ type HashCount struct {
 }
 
 const top_count = 10
-
-func setup_curser() (curser *curse.Cursor) {
-  var err error
-	curser, err = curse.New()
-	if err != nil {
-		log.Fatal(err)
-	}
-	for line := 0; line < top_count; line++ {
-		fmt.Printf("\n")
-	}
-  return curser
-}
 
 func get_top_HashCounts(tag_map map[string]int) (tops [top_count]HashCount) {
 	//var tops [top_count]HashCount
@@ -41,27 +27,21 @@ func get_top_HashCounts(tag_map map[string]int) (tops [top_count]HashCount) {
 	return tops
 }
 
-func score_hashtags(tag_chan chan string) {
+func score_hashtags(tag_chan chan string, top_chan chan []byte) {
 	tag_map := make(map[string]int)
   total_count := 0
   market_tick := make(chan int)
-	curser := setup_curser()
   next_tick := 100 + rand.Intn(100)
 	for {
 		select {
 		case <- market_tick:
 			{
-				tops := get_top_HashCounts(tag_map)
-				for range tops {
-					curser.MoveUp(1).EraseCurrentLine()
-				}
-				for _, top_hash := range tops {
-					fmt.Printf("%s", top_hash.Text)
-					x, y, _ := curse.GetCursorPosition()
-					curser.Move(x+50, y)
-					fmt.Printf("%d\n", top_hash.Count)
-				}
-				tag_map = make(map[string]int)
+				tops, err := json.Marshal(get_top_HashCounts(tag_map))
+	      if err != nil {
+		      log.Fatal(err)
+	      }
+        top_chan <- tops
+        tag_map = make(map[string]int)
 			}
 		case m := <-tag_chan:
 			{
@@ -71,8 +51,6 @@ func score_hashtags(tag_chan chan string) {
           total_count = 0;
           go func() { market_tick <- next_tick; }()
         }
-        curser.MoveUp(1).EraseCurrentLine();
-        fmt.Printf("%d\n", total_count);
 			}
 		}
 	}
@@ -85,13 +63,29 @@ func main() {
 			}
 		}
 	}
+
+	top_chan := make(chan []byte)
+
+  producer, err := nsq.NewProducer("localhost:4150", nsq.NewConfig())
+  if err != nil {
+    log.Fatalf("failed to create nsq.Producer - %s", err)
+  }
+
+  go func() {
+    for top := range top_chan {
+      err := producer.Publish("top", top)
+      if err != nil {
+        log.Fatalf("Failed to publish top tags - %s", err);
+      }
+    }
+  }()
+
 	consumer, err := nsq.NewConsumer("tweet", "bank#ephemeral", nsq.NewConfig())
 	if err != nil {
 		log.Fatal(err)
 	}
-	tag_chan := make(chan string)
 
-	//bid_map := make(map[string]string)
+	tag_chan := make(chan string)
 
 	consumer.AddHandler(nsq.HandlerFunc(func(m *nsq.Message) error {
 		var ms Status
@@ -101,6 +95,7 @@ func main() {
 		}
 		return nil
 	}))
+
 	err = consumer.ConnectToNSQDs([]string{"localhost:4150"})
-	score_hashtags(tag_chan)
+	score_hashtags(tag_chan, top_chan)
 }
